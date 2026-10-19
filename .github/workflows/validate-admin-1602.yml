@@ -18,17 +18,20 @@ jobs:
         with:
           targets: wasm32v1-none
       - name: Library and test compilation
+        id: compile
         continue-on-error: true
         run: |
           set -o pipefail
           cargo check -p admin 2>&1 | tee check-admin.log
           cargo check -p admin --tests 2>&1 | tee check-tests.log
       - name: Admin tests
+        id: tests
         continue-on-error: true
         run: |
           set -o pipefail
           cargo test -p admin -- --test-threads=2 2>&1 | tee test-admin.log
       - name: Release WASM and size budget
+        id: wasm
         continue-on-error: true
         run: |
           set -o pipefail
@@ -36,8 +39,27 @@ jobs:
           bytes=$(stat -c%s target/wasm32v1-none/release/admin.wasm)
           echo "admin.wasm: $bytes bytes; budget: 65536" | tee wasm-size.log
           test "$bytes" -le 65536
+      - name: Workspace formatting
+        continue-on-error: true
+        run: cargo fmt --all -- --check > fmt-workspace.log 2>&1
+      - name: Workspace Clippy
+        continue-on-error: true
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings > clippy-workspace.log 2>&1
+      - name: Workspace tests
+        continue-on-error: true
+        run: cargo test --workspace > test-workspace.log 2>&1
+      - name: Error code wire stability
+        continue-on-error: true
+        run: cargo test -p credence_errors error_codes_wire > error-codes-wire.log 2>&1
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: admin-1602-validation
           path: '*.log'
+      - name: Enforce admin acceptance checks
+        if: always()
+        env:
+          COMPILE: ${{ steps.compile.outcome }}
+          TESTS: ${{ steps.tests.outcome }}
+          WASM: ${{ steps.wasm.outcome }}
+        run: test "$COMPILE/$TESTS/$WASM" = success/success/success
