@@ -44,31 +44,18 @@ jobs:
           set -o pipefail
           cargo build -p admin --target wasm32v1-none --release 2>&1 | tee wasm-build.log
           bytes=$(stat -c%s target/wasm32v1-none/release/admin.wasm)
-          echo "admin.wasm: $bytes bytes; budget: 65536" | tee wasm-size.log
+          echo "Unoptimized cargo artifact: $bytes bytes" | tee wasm-size.log
+          curl --fail --location --retry 3 https://github.com/stellar/stellar-cli/releases/download/v28.1.0/stellar-cli-28.1.0-x86_64-unknown-linux-gnu.tar.gz -o "$RUNNER_TEMP/stellar-1602.tar.gz"
+          echo "c1680deee94301d33ada7a17f98411e642a4248c727afbd2e43050d345746462  $RUNNER_TEMP/stellar-1602.tar.gz" | sha256sum --check
+          mkdir -p "$RUNNER_TEMP/stellar-1602"
+          tar -xzf "$RUNNER_TEMP/stellar-1602.tar.gz" -C "$RUNNER_TEMP/stellar-1602"
+          stellar_bin=$(find "$RUNNER_TEMP/stellar-1602" -type f -name stellar -print -quit)
+          test -n "$stellar_bin"
+          "$stellar_bin" --version | tee stellar-version.log
+          "$stellar_bin" contract build --package admin 2>&1 | tee stellar-build.log
+          bytes=$(stat -c%s target/wasm32v1-none/release/admin.wasm)
+          echo "Stellar build artifact: $bytes bytes; budget: 65536" | tee -a wasm-size.log
           test "$bytes" -le 65536
-      - name: Compare size-only compiler options
-        continue-on-error: true
-        run: |
-          python3 - <<'PY'
-          import json, pathlib, subprocess
-          source = pathlib.Path('contracts/admin/src/lib.rs')
-          original = source.read_text()
-          variants = [('noinline', None), ('size-s', 's'), ('level-1', 1), ('level-2', 2), ('level-3', 3)]
-          for name, level in variants:
-              source.write_text(original)
-              if name == 'noinline':
-                  source.write_text(original.replace('fn bump_instance_ttl(', '#[inline(never)]\nfn bump_instance_ttl(').replace('fn bump_config_epoch(', '#[inline(never)]\nfn bump_config_epoch('))
-              command = ['cargo', 'build', '-p', 'admin', '--target', 'wasm32v1-none', '--release']
-              if level is not None:
-                  command += ['--config', 'profile.release.package.admin.opt-level=' + json.dumps(level)]
-              with open('size-option-' + name + '.log', 'w') as log:
-                  result = subprocess.run(command, stdout=log, stderr=subprocess.STDOUT)
-                  if result.returncode == 0:
-                      size = pathlib.Path('target/wasm32v1-none/release/admin.wasm').stat().st_size
-                      log.write('\n' + name + ': ' + str(size) + ' bytes\n')
-                      print(name, size)
-          source.write_text(original)
-          PY
       - name: Workspace formatting
         continue-on-error: true
         run: cargo fmt --all -- --check > fmt-workspace.log 2>&1
@@ -81,11 +68,42 @@ jobs:
       - name: Error code wire stability
         continue-on-error: true
         run: cargo test -p credence_errors error_codes_wire > error-codes-wire.log 2>&1
+      - name: Format only changed Rust regions
+        run: |
+          git fetch --depth 1 origin main
+          python3 - <<'PY'
+          import difflib, pathlib, subprocess, tempfile
+          base = 'f3bd7c28ff84ff7b6d8131878a65fcc58b59ea5e'
+          files = subprocess.check_output(['git','diff','--name-only',base,'HEAD'], text=True).splitlines()
+          patches = []
+          for name in files:
+              if not name.startswith('contracts/admin/src/') or not name.endswith('.rs'):
+                  continue
+              path = pathlib.Path(name)
+              current = path.read_text().splitlines(keepends=True)
+              before = subprocess.check_output(['git','show',base+':'+name], text=True).splitlines(keepends=True)
+              changed = [(c,d) for tag,a,b,c,d in difflib.SequenceMatcher(None,before,current,autojunk=False).get_opcodes() if tag!='equal']
+              with tempfile.TemporaryDirectory() as directory:
+                  formatted = pathlib.Path(directory)/path.name
+                  formatted.write_text(''.join(current))
+                  subprocess.run(['rustfmt','--edition','2021','--config','skip_children=true',str(formatted)],check=True)
+                  lines = formatted.read_text().splitlines(keepends=True)
+              selected = current[:]
+              for tag,a,b,c,d in reversed(difflib.SequenceMatcher(None,current,lines,autojunk=False).get_opcodes()):
+                  if tag!='equal' and any(a<=hi and b>=lo for lo,hi in changed):
+                      selected[a:b] = lines[c:d]
+              patches.extend(difflib.unified_diff(current,selected,fromfile='a/'+name,tofile='b/'+name))
+          pathlib.Path('format-touched.patch').write_text(''.join(patches))
+          pathlib.Path('format-touched-base.txt').write_text(subprocess.check_output(['git','rev-parse','HEAD'],text=True))
+          PY
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: admin-1602-validation
-          path: '*.log'
+          path: |
+            *.log
+            format-touched.patch
+            format-touched-base.txt
       - name: Enforce admin acceptance checks
         if: always()
         env:
