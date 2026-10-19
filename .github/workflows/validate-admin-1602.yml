@@ -46,6 +46,29 @@ jobs:
           bytes=$(stat -c%s target/wasm32v1-none/release/admin.wasm)
           echo "admin.wasm: $bytes bytes; budget: 65536" | tee wasm-size.log
           test "$bytes" -le 65536
+      - name: Compare size-only compiler options
+        continue-on-error: true
+        run: |
+          python3 - <<'PY'
+          import json, pathlib, subprocess
+          source = pathlib.Path('contracts/admin/src/lib.rs')
+          original = source.read_text()
+          variants = [('noinline', None), ('size-s', 's'), ('level-1', 1), ('level-2', 2), ('level-3', 3)]
+          for name, level in variants:
+              source.write_text(original)
+              if name == 'noinline':
+                  source.write_text(original.replace('fn bump_instance_ttl(', '#[inline(never)]\nfn bump_instance_ttl(').replace('fn bump_config_epoch(', '#[inline(never)]\nfn bump_config_epoch('))
+              command = ['cargo', 'build', '-p', 'admin', '--target', 'wasm32v1-none', '--release']
+              if level is not None:
+                  command += ['--config', 'profile.release.package.admin.opt-level=' + json.dumps(level)]
+              with open('size-option-' + name + '.log', 'w') as log:
+                  result = subprocess.run(command, stdout=log, stderr=subprocess.STDOUT)
+                  if result.returncode == 0:
+                      size = pathlib.Path('target/wasm32v1-none/release/admin.wasm').stat().st_size
+                      log.write('\n' + name + ': ' + str(size) + ' bytes\n')
+                      print(name, size)
+          source.write_text(original)
+          PY
       - name: Workspace formatting
         continue-on-error: true
         run: cargo fmt --all -- --check > fmt-workspace.log 2>&1
