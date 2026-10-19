@@ -1,0 +1,43 @@
+name: Validate admin issue 1602
+on:
+  push:
+    branches: [validation/1602-admin-a91f]
+permissions:
+  contents: read
+jobs:
+  admin:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      CARGO_BUILD_JOBS: 2
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32v1-none
+      - name: Library and test compilation
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          cargo check -p admin 2>&1 | tee check-admin.log
+          cargo check -p admin --tests 2>&1 | tee check-tests.log
+      - name: Admin tests
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          cargo test -p admin -- --test-threads=2 2>&1 | tee test-admin.log
+      - name: Release WASM and size budget
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          cargo build -p admin --target wasm32v1-none --release 2>&1 | tee wasm-build.log
+          bytes=$(stat -c%s target/wasm32v1-none/release/admin.wasm)
+          echo "admin.wasm: $bytes bytes; budget: 65536" | tee wasm-size.log
+          test "$bytes" -le 65536
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: admin-1602-validation
+          path: '*.log'
